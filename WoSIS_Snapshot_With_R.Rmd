@@ -1,0 +1,597 @@
+---
+title: "Accessing WoSIS from R -- 'Snapshot' Version"
+author: "D G Rossiter"
+date: "`r format(Sys.Date(), '%d-%B-%Y')`"
+output:
+  html_document:
+    fig_height: 4
+    fig_width: 6
+    number_section: yes
+    theme: spacelab
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+bibliography: wosis.bib
+---
+
+```{r setup, include=FALSE, purl=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This document shows how to access WoSIS "Snapshot" data from  R.
+For access to WoSIS "Latest" data from R, see `WoSIS_Latest_with_R.Rmd` at https://git.wur.nl/Batje001/wosis/-/tree/master/R_scripts.
+
+The "Snapshot" datasets are static, containing the standardised soil profile (point observation) data available at a given moment (e.g. July 2016). So far there are two of these, registered with Digital Object Identifiers (DOI):
+
+* 2016: https://dx.doi.org/10.17027/isric-wdcsoils.20160003
+* 2019: https://dx.doi.org/10.17027/isric-wdcsoils.20190901
+
+The reason to have snapshots, as opposed to just the latest information, is to allow comparisons of datasets as they evolve over time.
+
+For an overview of WoSIS, see https://www.isric.org/explore/wosis. This links to https://www.isric.org/explore/wosis/accessing-wosis-derived-datasets which explains the difference between snapshot and dynamic datasets, and how to access them. 
+
+The [Procedures Manual](https://dx.doi.org/10.17027/isric-wdc-2020-01) describes how the database was built.
+
+# Packages
+
+If you do not have these on your system, install with `install.packages(..., dependencies=TRUE)` or via the R Studio package manager.
+
+```{r}
+library(rgdal)          # interface to GDAL Geographic Data Abstraction Language
+library(gdalUtils)      # some useful utilities for GDAL
+library(readr)          # tidyverse functions to read files
+library(sf, warn.conflicts = FALSE)             # Simple Features spatial data
+library(sp)             # spatial data types in R
+library(dplyr, warn.conflicts = FALSE)          # another way to handle tabular data
+library(dbplyr, warn.conflicts = FALSE)    # databases from dplyr
+library(DBI)            # R database interface
+library(RSQLite)        3333333# R interface to SQLite databses
+```
+
+GDAL is used for spatial data import/export, coordinate systems, etc. Check for a valid GDAL installation with the following code (not run here):
+
+```{r check.gdal, eval=FALSE, purl=FALSE}
+gdal_setInstallation()
+valid_install <- !is.null(getOption("gdalUtils_gdalPath"))
+if (valid_install)
+   print("Valid GDAL found") else stop("No valid GDAL") 
+```
+
+# Downloading a WoSIS Snapshot
+
+A "Snapshot" is downloaded as a compressed file from the stable data location given by its DOI, for example the 2019 version: https://dx.doi.org/10.17027/isric-wdcsoils.20190901. This link is to the page which describes the dataset, its metadata, a WMS (Web Mapservice) link, and a download link, to work with the data in R. It is not possible to download only part of the database; any subsetting must be done after download.
+
+Download the 2019 snapshot into a subdirectory relative to the current working directory, creating the subdirectory if necessary.
+This is a *very large file*, about 146.5 Mb, so if it has already been downloaded, do not do it again.
+
+```{r download.snapshot.2019}
+wosis.dir.name <- "./wosis2019"
+if (!file.exists(wosis.dir.name)) dir.create(wosis.dir.name)
+zip.file.name <- "WoSIS_2019_September.zip"
+snapshot.zip <- paste0("https://files.isric.org/public/wosis_snapshot/", zip.file.name)
+target.zip <- paste0(wosis.dir.name, "/", zip.file.name)
+if (!file.exists(target.zip)) {
+  download.file(snapshot.zip, destfile=target.zip)
+}
+```
+
+Unpack the file; this will take some time. If already unpacked from a previous run, no need to do it again.
+
+```{r}
+if (!file.exists(paste0(wosis.dir.name, "/wosis_201909.gpkg"))) {
+  system.time(unzip(target.zip, exdir=wosis.dir.name, junkpaths=TRUE))  
+}
+list.files(wosis.dir.name)
+```
+
+This results in about *20x more storage, 3.8Gb*. It includes four _tab-delimited_ flat text files with extension `.tsv` (1.8 Gb) and one _Geopackage_^[https://www.geopackage.org] with extension `.gpkg` (2.2 Gb).
+These provide two ways to access the same information.
+
+* `wosis_201909.gpkg`: the Geopackage   
+* `wosis_201909_attributes.tsv` : List of attributes with their codes, whether each is a site or horizon property, the unit of measurement, the number of profiles or layers, the inferred uncertainty; these attributes are used in the other files       
+* `wosis_201909_layers_chemical.tsv` : Chemical properties indexed by profile and layer
+* `wosis_201909_layers_physical.tsv` : Physical properties indexed by profile and layer  
+* `wosis_201909_profiles.tsv` : Profile information, including coordinates, primary key, and classification                   
+The file `Readme_first_WoSIS_snapshot_September_2019.pdf` explains this dataset, please take some time to read it.
+
+# Working with the tab-separated value tables
+
+## WoSIS profiles
+
+The profile-level information is stored in file `wosis_201909_profiles.tsv`.
+
+
+```{r}
+profiles <- read_tsv(paste0(wosis.dir.name, "/wosis_201909_profiles.tsv"))
+dim(profiles)
+names(profiles)
+```
+
+This has the same information as the geopackage, but in addition the profile ID, which can be used to link with the attribute tables.
+
+List the countries and contributing datasets:
+
+```{r}
+length(unique(profiles$country_name))
+head(table(profiles$country_name))
+length(unique(profiles$dataset_id))
+head(table(profiles$dataset_id))
+```
+
+Profiles come from `r length(unique(profiles$country_name))` countries (variously defined) and `r length(unique(profiles$dataset_id))` contributing datasets. The list of sources (i.e., databases contributing to WoSIS) is internal to ISRIC, please ask.
+
+Profiles may be classified in one or more of the the three soil classification systems, as specified when the profiles were added to WoSIS. Note that there had been no attempt to re-classify or correlate.
+
+```{r}
+table(profiles$cstx_order_name)
+table(profiles$cwrb_reference_soil_group)
+table(profiles$cfao_major_group)
+sum(is.na(profiles$cfao_major_group))
+```
+
+Most profiles  are missing classifications in any system; the percentage w/o any classification is:
+
+```{r no.class.prof}
+round(100*(length(intersect(which(is.na(profiles$cfao_major_group)), 
+          intersect(which(is.na(profiles$cwrb_reference_soil_group)),
+          which(is.na(profiles$cstx_order_name))))))/dim(profiles)[1],1)
+```
+
+The profiles all have coördinates (fields `longitude`, `latitude`) and so can be converted to spatial objects (Simple Features or `sp`); the Coördinate Reference System (CRS) is given as geographic coördinates on the WGS84 datum the WoSIS documentation. However, the points come from many sources and may have used other CRS, and many were not georeferenced with high accuracy.
+
+The accuracy of the geographical coördinates is given in decimal degrees, according to the precision reported in the original source, which may have been in degrees-minutes-seconds or decimal degrees. This does not take into account any datum shifts.
+
+```{r}
+table(profiles$geom_accuracy)
+```
+
+So, you could select only the high-precision points for spatial modelling, but all points for statistical summaries.
+
+Make a spatial version of the profile database:
+
+```{r}
+profiles.sp <- data.frame(profiles)
+coordinates(profiles.sp) <- c("longitude", "latitude")
+proj4string(profiles.sp) <- CRS("+init=epsg:4326")
+str(profiles.sp)
+```
+
+Show a map of the higher-precision profiles in the Netherlands:
+
+```{r}
+dim(profiles.hi <- profiles %>% 
+      dplyr::filter(country_id=="NL") %>%
+      dplyr::filter(geom_accuracy < 1/3600))
+coordinates(profiles.hi) <- c("longitude", "latitude")
+proj4string(profiles.hi) <- CRS("+init=epsg:4326")
+spplot(profiles.hi, zcol="geom_accuracy", key.space="right")
+```
+
+An important attribute at the site level is the sampling depth:
+
+```{r}
+profiles %>% select(profile_id, country_id, longitude, latitude, geom_accuracy, dsds)
+```
+
+## WoSIS attribute tables
+
+The values of the attributes are at either the profile (site) level or the layer (usually a pedogenetic horizon) level.
+There is also a table with the list of attributes and their description. The profiles attributes were discussed in the previous section.
+
+The layer level attributes are in two (very large) text files, each about 850 Mb.
+
+The fields are separated ('delimited') by tabulation characters ('tabs'). These files can be read into R with the `read.table` function from the `utils` package, with appropriate arguments: the separator `sep` is a tabulation mark `\t`, and there is a header line. Strings are read as-is, not converted to factors (categorical variables).
+
+### List of attributes
+
+The first table is the list of attributes, which points to the other files with the attribute values and the corresponding profile and layer:
+
+```{r}
+attributes <- read.table(paste0(wosis.dir.name, "/wosis_201909_attributes.tsv"),
+                        header=TRUE,
+                        sep="\t",
+                        stringsAsFactors=FALSE)
+str(attributes)
+```
+
+List the attribute codes, names, and units of measure:
+
+```{r}
+attributes[, c("code", "type", "attribute", "unit")]
+table(attributes$type)
+```
+
+Four attributes are at "site" level, and are found in the `profiles` table discussed in the previous section.
+The other 48 are per-"horizon" and are found in the `physical` or `chemical` attribute tables, see below.
+
+The codes are the first part of seven field names per attribute in the attribute tables. For example `CLAY` becomes part of names like `clay_method` in the physical attributes table. Each attribute has several fields, with the tail of the name as:
+
+* `value`  -- one or more values, in the format {1:value; 2:value...}, which are duplicate measurements 
+* `value_avg`  -- the average of the values
+* `method` -- text description of the analytical method
+* `date` -- one or more values, in the format {1:yyyy-mm-dd; 2:yyyy-mm-dd...}, which are the dates each of the duplicate measurements was added to the database (not the original measurement date, nor the field sampling date)
+* `dataset_id` -- text code of original database
+* `profile_code` -- text code of profile from original database
+* `licence` -- text string of the Creative Commons ^[https://creativecommons.org/licenses/] license for this value, e.g. `CC-BY-NC`
+
+So for example in the `physical` table (see below) for the first attribute `bdfi33`, there are the following fields:
+
+* `bdfi33_value`
+* `bdfi33_value_avg`
+* `bdfi33_method`
+* `bdfi33_date`
+* `bdfi33_dataset_id`
+* `bdfi33_profile_code`
+* `bdfi33_licence`
+
+
+How many profiles/layers of each?
+
+```{r}
+attributes[, c("code", "profiles", "layers")]
+```
+
+Each one has a description, e.g.,
+
+```{r}
+attributes[1:5, c("code",  "description")]
+```
+
+And each has an estimated accuracy (see below for explanation):
+
+```{r}
+attributes[1:5, c("code", "attribute", "accuracy")]
+```
+
+Find the attributes related to P:
+
+```{r}
+ix <- grep("Phosphorus", attributes$attribute)
+attributes[ix, c("code", "attribute", "profiles", "layers", "unit", "accuracy")]
+attributes[ix, "description"]
+```
+
+These are total P, or extractable P by various strengths of extractant.
+Especially interesting here is the `accuracy` field, explained in $\S 2.2.3$ of the procedures manual. 
+
+"The precision and accuracy of results from laboratory measurements can be derived from the random
+error and systematic error in repeated experiments on reference materials or with reference methods...
+For measurements that use other devices, such as GPS and soil moisture sensors, the accuracy can be obtained from manufacturers, literature and even expert knowledge."
+
+In the WoSIS snapshot, there is no attempt to give the accuracy of each measurement individually. Instead, expert knowledge applied to various datasets of repeated measurements has been used to estimate a typical accuracy of each method, see the `attributes` table, above.
+
+This is given in the same units as the attribute, here $\mathrm{mg}\; \mathrm{kg}^{-1}$.
+
+So for the P-related measurements, total and water-soluble are considered in general the most accurate, $15 \mathrm{mg}\; \mathrm{kg}^{-1}$, compared to a total P median value $118$ and a mean value of $284.7$ in the database (see below under "Chemical attributes"). Bray I is considerably less accurate than Mehlich 3 or Olsen. 
+
+### Physical attributes
+
+The remaining two attributes files are text files with per-layer attribute.
+Each entry has a two-field key: profile and layer.
+They can be linked to the profiles via a foreign key. 
+They must be read in to a single structure, there is no way to subset them during import.
+
+To read in the physical attributes to the R workspace,we use the `readr` function `read_tsv`, i.e. "read tab-delimited text file".
+This function makes a guess of the data type of each field, by reading the first "few" records (by default 1000). However in tests of this, because of the variety of value formats in the fields, the guesses do not work very well. Therefore we were forced to define an explicit specification of each of the 195 column's data type, using the optional `col_types` argument, and referring to the documentation.
+
+Each column is specified as onne character: `c` = character, `i` = integer, `n` = number, `d` = double-precision number, `l` = logical, `f` = factor, `D` = date, `T` = date time, `t` = time, `?` = guess, or `_` to skip the column.
+
+```{r}
+physical <- readr::read_tsv(paste0(wosis.dir.name, "/wosis_201909_layers_physical.tsv"),
+  col_types="iiddclcdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccc")
+dim(physical)
+```
+
+There are `r dim(physical)` layers of profiles with physical properties. 
+
+These are the attributes, as explained in the `attributes` table (see above), along with profile and horizon identificatiojn:
+
+```{r}
+names(physical)
+```
+
+Examine the format of a single attribute along some profiles:
+
+```{r}
+(.clay.fields <- which(substr(names(physical), 1, 4)=="clay"))
+data.frame(physical[1, .clay.fields])
+(.clay.values.fields <- which(substr(names(physical), 1, 10)=="clay_value"))
+data.frame(physical[,1:5], .clay.values.fields)[1:12,]
+```
+
+The format for an attribute is `{seq:val[,seq:val]}` where the `seq` is an integer on `[1...]` indicating which measurement number -- note that there can be more than one measurement per property, e.g., repeated lab. measurements, and `val` is the numeric value.
+
+The average of all measurements has its own field, here `clay_value_avg`, so if we only want the average, it is prepared for us.
+
+With `dplyr` functions we can easily subset by attribute name.
+For example to see the hydrometer-based methods of measuring clay:
+
+```{r}
+(clay.values <- physical %>% select(contains("clay")))
+length(clay.methods <- unique(clay.values$clay_method))
+head(clay.methods)
+length(clay.method.hydrometer.ix <- grep("hydrometer", clay.methods))
+clay.methods[clay.method.hydrometer.ix][1:3]
+```
+
+We see the list of values of individual measurements, the average, the method used, the date of addition to WoSIS, the dataset ID, and the profile. This allows us to select by measurement method and dataset.
+
+If we are satisfied with just the average, we make a table with that value, the profile, and the layer:
+
+```{r}
+(clay.values <- physical %>% select(profile_id:layer_name, clay_value_avg))
+summary(clay.values)
+hist(clay.values$clay_value_avg, breaks=seq(0,100, by=2),
+     xlab="Clay concentration, %", main="")
+```
+
+### Chemical attributes
+
+To read in the chemical attributes to the R workspace, we again need to supply the optional `col_types` argument to `readr::read_tsv`, thereby specifying the data type of each field.
+
+```{r}
+chemical <- readr::read_tsv(paste0(wosis.dir.name, "/wosis_201909_layers_chemical.tsv"),
+                            col_types="iiddclcdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccccdccccc")
+dim(chemical)
+# spec(chemical)
+names(chemical)
+```
+
+There are `r dim(chemical)` layers of profiles with chemical properties.
+
+
+Select layers with total P values:
+
+```{r}
+total.P <- chemical %>% 
+   dplyr::filter(!is.na(phptot_value_avg)) %>% 
+   select(profile_id:layer_name, phptot_value:phptot_licence)
+summary(total.P)
+```
+
+
+## Joining profile and attribute information
+
+At the profile (site) level, we can select by location or country or bounding box.
+But to summarize or display attribute values by these, we need to _join_ the profile and attribute tables.
+
+The primary key in the profiles table is `profile_id`; the `profile_id` field in the two attribute tables is the foreign key to link the profiles with their attributes.
+These along with the `profile_layer_id` to specify the soil layer result in the full key to the attribute tables.
+
+It's simplest to select the profiles in the profile table, and then use these profile IDs to select out of the attribute tables.
+
+For example, to analyze the particle-size distribution of Indian soil profiles we first find the profiles from India:
+
+```{r india.profiles}
+(profiles.india <- dplyr::filter(profiles, country_name=="India") %>%
+    select(profile_id, longitude, latitude))
+```
+
+We then use the `left_join` function to add the layers to each profile. This will repeat the primary key `profile_id` for each value of the secondary key `profile_layer_id` (i.e., the same table structure as the table being joined), with any fields selected from the main (profile) table repeated.
+
+```{r left.join}
+(layers.india <- left_join(profiles.india, physical) %>% 
+      select(profile_id, upper_depth:layer_name,sand_value_avg, silt_value_avg, clay_value_avg))
+```
+
+Convert this to a `data.frame`:
+
+```{r to.df}
+layers.india <- as.data.frame(layers.india)
+```
+
+
+# Working with the Geopackage
+
+For an introduction to Geopackage data structures, see ["Getting Started With GeoPackage"](https://www.geopackage.org/guidance/getting-started.html).
+
+A Geopackage stores data in SQL tables.
+To access these, we first establish a connection to the SQL database with the `DBI::dbConnect` function of the `DBI` "data base interface" R package.
+
+```{r read.gpkg}
+source <- paste0(wosis.dir.name, "/", "wosis_201909.gpkg")
+(gpkg <- DBI::dbConnect(RSQLite::SQLite(), source))
+```
+
+
+Once the connection has been established, we can list the tables in the database with the `DBI::dbListTables` function.
+
+```{r list.tables}
+DBI::dbListTables(gpkg)
+```
+
+There are tables with the internal structure of the geopackage and others with geographic data (`wosis_201909_profiles`),  attribute descriptions (`wosis_201909_attributes`), and the attributes themselves (`wosis_201909_layers_chemical`, `wosis_201909_layers_physical`). The information in the profiles and attribute tables is the same as in the text files (above).
+
+The `gpkg_geometry_columns` table has only one record, showing the spatial reference.
+Show its contents with `dplyr::tbl`:
+
+```{r geom.column}
+dplyr::tbl(gpkg, "gpkg_geometry_columns")
+```
+
+The `wosis_201909_profiles` table contains the site information, including profile ID, country of origin, dataset ID, and soil classification:
+
+```{r profiles.table}
+dplyr::tbl(gpkg, "wosis_201909_profiles")
+```
+
+The accuracy of the geographical coördinates (field `geom_accuracy`) is given in decimal degrees, according to the precision reported in the original source, which may have been in degrees-minutes-seconds or decimal degrees. This does not take into account any datum shifts.
+
+
+There are several internal R formats for spatial data; we show how to use two of them: Simple Features and `sp` classes.
+
+## Geometry with Simple Features
+
+Simple Features is a relatively new standard for representing spatial data ^[https://github.com/r-spatial/sf/]. The `sf` package [@Pebesma_2018] provides R access to this representation.
+
+To read the Geopackage into an R spatial object as Simple Features we use the `sf::st_read` function.
+We must specify the optional `fid_column_name` argument to include the profile ID (primary key) as a column in the attribute table.
+
+The only GIS layer in the Geodatabase (i.e., with coördinates) is the profiles table.
+
+```{r sf.layers}
+st_layers(dsn=source)
+wosis.sf <- st_read(source, stringsAsFactors=FALSE,
+                    fid_column_name="profile_id")
+class(wosis.sf)
+dim(wosis.sf)
+names(wosis.sf)
+```
+
+There are almost 200k observations.
+
+The second-to-last column `profile_id` is the primary key, as specified with `st_read`.
+The final column `geom` contains the geometry of each item, here the point coördinates.
+
+```{r sf.geom}
+class(wosis.sf$geom)
+str(wosis.sf$geom)
+st_bbox(wosis.sf$geom)
+st_crs(wosis.sf$geom)
+head(wosis.sf$geom, 4)
+```
+
+We see the geometry type, dimensions, bounding box, and coördinate reference system (CRS).
+
+Each row is a single record, for example here a profile from Angola:
+
+```{r sf.row}
+wosis.sf[1024,]
+```
+
+To display a particular profile, find its `profile_id`:
+
+```{r sf.profile}
+wosis.sf[which(wosis.sf$profile_id==45820),]
+```
+
+Each column is an attribute; these can be summarized. 
+
+For example, the dataset source:
+
+```{r sf.attrs}
+length(unique(wosis.sf$country_name))
+head(table(wosis.sf$country_name))
+length(unique(wosis.sf$dataset_id))
+head(table(wosis.sf$dataset_id))
+```
+
+Profiles come from `r length(unique(wosis.sf$country_name))` ISO countries (variously defined) and `r length(unique(wosis.sf$dataset_id))` contributing datasets. The list of sources (i.e., databases contributing to WoSIS) is internal to ISRIC, please ask.
+
+
+The profile-level attributes can also be plotted as maps, for example Soil Taxonomy Order in a 4x2 degree tile in central NY State (USA):
+
+```{r plot-st,fig.width=9, fig.height=6}
+plot(wosis.sf["cstx_order_name"],
+     xlim=c(-78, -74), ylim=c(42, 44),
+     pch=20,
+     key.length=1, # make the legend wide enough to show all classes
+     main="Soil Taxonomy Order")
+grid()
+```
+
+Profiles can be subsetted by profile-level attribute, e.g., to work with just the Indian data:
+
+```{r subset.profiles}
+(wosis.sf.india <- wosis.sf %>% dplyr::filter(country_name=="India"))
+table(wosis.sf.india$dataset_id)
+wosis.sf.india %>% count(cstx_order_name)
+```
+
+## Geometry with `sp`
+
+An older R spatial representation than Simple Features is `sp` "Classes and methods for spatial data in R", explained in detail in [@Pebesma_Bivand_2005] and  [@BivandAppliedspatialdata2013].
+
+We can read the Geopackage into an R `sp` object with the `readOGR` function of the `rgdal` package. By default `readOGR` reads the first layer from a Geopackage; here that is the profiles (the only layer with geometry).
+
+In this dataset strings are to be interpreted as R factors, i.e., categorical variables.
+
+```{r read.as.sp}
+ogrInfo(dsn=source)
+wosis.sp <- readOGR(dsn=source,
+                stringsAsFactors = TRUE)
+class(wosis.sp)
+bbox(wosis.sp)
+proj4string(wosis.sp)
+dim(wosis.sp)
+summary(wosis.sp)
+names(wosis.sp@data)
+```
+
+The shapefile has been imported as a `SpatialPointsDataFrame` with the correct CRS. In the `sp` data structure the coördinates are not stored as an attribute (as in Simple Features), instead, they are in their own slot.
+
+The profile data can be summarized:
+
+```{r summarize.profiles}
+unique(wosis.sp$cwrb_reference_soil_group)
+summary(is.na(wosis.sp$cwrb_reference_soil_group))
+table(wosis.sp$cwrb_reference_soil_group)
+```
+
+Here is a map of the profiles with a WRB classification in a $4^\circ \times 4^\circ$ tile including the Netherlands:
+
+```{r spplot.orders, height=9, width=5}
+spplot(wosis.sp, zcol="cwrb_reference_soil_group",
+     xlim=c(4, 8), ylim=c(50, 54),
+     pch=20, key.space="right",
+     main="WRB RSG")
+```
+
+## Attributes
+
+The Geopackage also contains SQL tables with the physical and chemical attributes. These are accessed as SQL connections:
+
+```{r class.chem.phys}
+class(dplyr::tbl(gpkg, "wosis_201909_layers_chemical"))
+class(dplyr::tbl(gpkg, "wosis_201909_layers_physical"))
+```
+
+Read these into R and display the variable names:
+
+```{r read.chem}
+wosis.chemical <- dplyr::tbl(gpkg, "wosis_201909_layers_chemical")
+(wosis.chemical$ops$vars)
+```
+
+Further these can be processed as for the tables, see above.
+
+# Working with WoSIS as a `SoilProfileCollection`
+
+The `aqp` ["Algorithms for Quantitive Pedology" package](https://ncss-tech.github.io/AQP/) provides many functions for working with soil profile data. Its principal data structure is the `SoilProfileCollection`, which stores profiles and their per-horizon attributes.
+
+Load this package:
+
+```{r load.aqp}
+library(aqp)            # Algorithms for Quantitative Pedology
+```
+
+In this example we convert the small dataset for India to a `SoilProfileCollection`.
+
+The `aqp::depth` function initializes the `SoilProfileCollection` object. The formula has the field name of the profile on the left, and the the field names of the horizon boundaries on the right. These fields are in the WoSIS layer.
+
+Note that the object to be converted to a `SoilProfileCollection` must be a `data.frame` only, not also a `dpylr` object.
+
+```{r make.spc}
+ds.aqp <- as.data.frame(layers.india)
+depths(ds.aqp) <- profile_id ~ upper_depth + lower_depth
+is(ds.aqp)
+slotNames(ds.aqp)
+str(ds.aqp@site)
+str(ds.aqp@horizons)
+```
+
+Note how the horizons have been grouped into sites, in the `@site` slot, and the per-horizon (by depth) values are in the `@horizons` slot. Here we have `r dim(ds.aqp@horizons)[1]` horizons in `r dim(ds.aqp@site)[1]` profiles.
+
+Now this `SoilProfileCollection` can be used for many `aqp` functions. For example, here is the depth distribution of average bulk density of the components for the first 24 listed profiles, labelled by genetic horizon.
+
+```{r plotspc, fig.width=12, fig.height=8}
+ds.aqp[100,]
+plotSPC(ds.aqp[100:124,], name="layer_name", color='clay_value_avg')
+```
+
+Notice tha the profiles have different thickness.
+
+# References

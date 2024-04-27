@@ -1,0 +1,697 @@
+---
+title: "Accessing WoSIS from R -- 'Latest' Version"
+author: "D G Rossiter"
+date: "`r format(Sys.Date(), '%d-%B-%Y')`"
+output:
+  html_document:
+    fig_height: 4
+    fig_width: 6
+    number_section: yes
+    theme: spacelab
+    toc: yes
+    toc_float: yes
+  word_document:
+    toc: yes
+  pdf_document:
+    toc: yes
+bibliography: wosis.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warnings = FALSE, purl = FALSE)
+options(warn=-1)
+```
+
+# Introduction
+
+This document shows how to access WoSIS "Latest" data from  R. For access to WoSIS "Snapshot" data from R, see `WoSIS_Snapshot_with_R.Rmd` at https://git.wur.nl/Batje001/wosis/-/tree/master/R_scripts.
+
+The "Latest" dynamic dataset contains the most recent version of standardised soil data served from WoSIS. Being dynamic, the dataset will grow once new point data are standardised, additional soil properties are considered, and/or when possible amendments are required.
+
+For an overview of WoSIS, see https://www.isric.org/explore/wosis. This links to https://www.isric.org/explore/wosis/accessing-wosis-derived-datasets which explains the difference between snapshot and dynamic datasets, and how to access them.
+
+The [Procedures Manual](https://dx.doi.org/10.17027/isric-wdc-2020-01) describes how the WoSIS database is built.
+
+
+# Packages
+
+If you do not have these on your system, install with `install.packages(..., dependencies=TRUE)` or via the R Studio package manager. 
+
+The `gdalUtilities` package replaces the obsolete `gdalUtils` package, and as of end June 2022 must be installed from its author's github repository, using the `instll_github` function of the `devtools` package. 
+
+However, some functions (notably, `ogrinfo`) are not implemented there, and so `gdalUtils` must be used for these, and therefore your system must have a GDAL installation.
+
+In a future version of these procedures we will find a way to replace `ogrinfo` with currently-supported packages.
+
+```{r load.package}
+# library(devtools)
+# devtools::install_github("JoshOBrien/gdalUtilities")
+library(gdalUtilities)      # wrappers for GDAL utility programs that could be
+                        #  called from the command line, but here via `sf`
+# devtools::install_github("gearslaboratory/gdalUtils")
+library(gdalUtils)      # wrappers for GDAL utility programs that could be
+                        #  called from the command line,
+library(sf)             # spatial data types -- Simple Features
+library(stars)          # Spatiotemporal Arrays, Raster and Vector Data Cubes
+library(dplyr)          # tidyverse data manipulation functions
+library(ggplot2)        # gpplot graphics
+library(maps)           # optional -- for boundary polygons
+library(mapdata)
+```
+
+The `stars` and `sf` packages have built-in support for GDAL, the Geographic Data Abstraction Library.
+This is used to read, write and convert between formats. The `gdalUtilities` package provides direct access to GDAL via `sf::gdal_utils`.
+
+Check the drivers supported by your installation, and their capabilities, for the three we will use: the [OGC GeoPackages](https://www.geopackage.org) `GPKG`, the ESRI shapefile `ESRI`, and the CSV flat text file format `CSV`:
+
+```{r}
+drivers <- sf::st_drivers()
+# print(drivers)
+ix <- grep("GPKG", drivers$name,  fixed=TRUE)
+drivers[ix,]
+ix <- grep("ESRI", drivers$name,  fixed=TRUE)
+drivers[ix,]
+ix <- grep("CSV", drivers$name,  fixed=TRUE)
+drivers[ix,]
+```
+
+# WoSIS Web Feature Service
+
+The "latest" (dynamic) version of WoSIS is provided via
+[WFS (Web Feature Services)](https://www.opengeospatial.org/standards/wfs).
+This is described in less technical terms in [Wikipedia](https://en.wikipedia.org/wiki/Web_Feature_Service).
+
+WFS allows you to incorporate geographic data into your own GIS projects, unlike WMS (Web Map Service), which only displays geographic data within a GIS. Here we use R as the GIS, since it can handle both geographic and feature-space information.
+
+## Specify WoSIS WFS and list available layers
+
+Specify the web address of the "latest" version of WoSIS:
+
+```{r specify.wfs.address}
+wfs <- "WFS:https://maps.isric.org/mapserv?map=/map/wosis_latest.map"
+```
+
+List the layers in the WFS source with the `sf::st_layers` function.
+
+```{r ogrinfo.wfs}
+(layers.info <- st_layers(wfs))
+```
+
+There are `r length(layers.info$features)` layers. Most of the names refer to soil properties in a fairly obvious way: the database name `ms:wosis_latest:wosis_latest_` and then a property name, e.g., `bdfi33`. These names are explained
+[in the on-line documentation](https://www.isric.org/explore/wosis/accessing-wosis-derived-datasets).
+For example `bdfi33` is "Bulk density of the fine earth fraction, equilibrated at 33 kPa". units are $\textrm{mg} \; \textrm{kg}^{-1}$. 
+
+## Display site properties
+
+The layer `"ms:wosis_latest:wosis_latest_profiles"` contains the site information. 
+
+The `gdalUtils::ogrinfo` function displays information about a dataset accessible via GDAL. Here we see the metadata for the site information. Note the `so` "summary only" option. This suppresses listing of features, and shows only the summary information. We choose this because there are many profiles in the entire dataset.
+
+The options for `ogrinfo` are listed [at the GDAL on-line reference page](https://gdal.org/programs/ogrinfo.html).
+
+```{r ogrinfo.site}
+profiles.info <-
+  gdalUtils::ogrinfo(wfs, layer = "ms:wosis_latest_profiles",
+                     ro = TRUE, so = TRUE, q = TRUE)
+cat(profiles.info, sep="\n")
+```
+
+This shows the metadata of the sites.
+
+The `gdalUtils::ogrinfo` function also allows an optional limitation to a bounding box with the `spat` argument, as a four-element vector `(xmin, ymin, xmax, ymax)`. These are the coördinates in the layer's Coordinate Reference System (CRS), in this case geographic coördinates.
+
+For example, all the profile (site) information from a $2^\circ \times 2^\circ$ tile in central Europe.
+
+Note: the `q=FALSE` ("not quiet") option lists the geometry and feature count.
+
+```{r ogrinfo.eu.profiles.1}
+central.eu.profiles.info <-
+  gdalUtils::ogrinfo(wfs, ro=TRUE, so=TRUE, q=FALSE,
+                     layer="ms:wosis_latest_profiles",
+                     spat=c(6, 48, 8, 50),
+                     verbose = FALSE)
+head(central.eu.profiles.info, 8)
+```
+
+Show the number of features, the spatial extent, and the Coordinate Reference System (CRS):
+
+```{r ogrinfo.eu.profiles.2}
+ix.f <- grep("Feature Count", central.eu.profiles.info)
+central.eu.profiles.info[ix.f]
+ix.e <- grep("Extent", central.eu.profiles.info)
+central.eu.profiles.info[ix.e]
+ix.g <- grep("GEOGCRS", central.eu.profiles.info)
+cat(paste(central.eu.profiles.info[ix.g:(ix.g+17)], collapse="\n"))
+```
+
+Here we see the number of profiles in this tile, the extent (a bit smaller than the bounding box we requested), and  the CRS formatted as ["Well-Known Text"](https://docs.opengeospatial.org/is/12-063r5/12-063r5.html).
+The CRS corresponds to [EPSG code](https://www.epsg.org) `4326`, i.e., geographic coördinates on the WGS84 datum. 
+
+Show the data field names and their data types. These are listed after the `Geometry Column` line of the metadata:
+
+```{r show.fields}
+ix.p <- grep("Geometry Column", central.eu.profiles.info)
+n <- length(central.eu.profiles.info)
+central.eu.profiles.info[ix.p+1:n]
+```
+
+It seems that many fields marked as `NA` are reserved for future expansion of the soil properties.
+
+These codes are found in the [Procedures Manual](https://dx.doi.org/10.17027/isric-wdc-2020-01).
+
+The `gdalUtils::ogrinfo` function also allows [SQL (Structured Query Language](https://en.wikipedia.org/wiki/SQL) [queries](https://en.wikipedia.org/wiki/SQL_syntax) to limit the extent of the search, by using the optional `where` argument. To use this we need to know the field names, which we saw in the previous output.
+
+For example, the profiles from India:
+
+```{r ogrinfo.india.profiles}
+india.profiles.info <-
+  ogrinfo(wfs, ro=TRUE, so=TRUE, q=FALSE,
+          layer="ms:wosis_latest_profiles",
+          where="country_name='India'")
+```
+
+Show the number of records and geographic extent:
+
+```{r ogrinfo.india.profiles.2}
+ix.f <- grep("Feature Count", india.profiles.info)
+india.profiles.info[ix.f]
+ix.e <- grep("Extent", india.profiles.info)
+india.profiles.info[ix.e]
+```
+
+There are only `r india.profiles.info[ix.f]` profiles from India. Of course many more have been described, but despite the aim of WoSIS to be a complete world database, up till now it has proved impossible to develop a data-sharing arrangement with the [NBSSLUP](https://nbsslup.in/).
+
+## Display layer properties
+
+We need to know the layer's meaning, format, extent etc. before we read it into R. 
+
+Select the first property in the information list above. Again call `ogrinfo` but this time also specifying a layer within the WFS. Show only the summary, not the features, with the `so=TRUE` optional argument.
+
+Note: the `q=FALSE` option lists the geometry and feature count.
+
+```{r ogrinfo.properties, warnings=-1}
+property.info <- gdalUtils::ogrinfo(wfs, layer = "ms:wosis_latest_bdfi33",
+                                    ro = TRUE, so = TRUE, q = FALSE)
+cat(property.info, sep="\n")
+ix.f <- grep("Feature Count", property.info)
+property.info[ix.f]
+```
+
+This gives an explanation of ISRIC and WoSIS, and then the keywords showing this property.
+
+We see this is "Bulk density of the fine earth fraction* equilibrated at 33 kPa". Refer to the procedures manual for how each property (here, bulk density) was determined. The footnote `*` gives the definition of this term for this dataset. See also the feature count -- this is how many layers have a bulk density value.
+
+The `gdalUtils::ogrinfo` function allows [SQL (Structured Query Language](https://en.wikipedia.org/wiki/SQL) [queries](https://en.wikipedia.org/wiki/SQL_syntax) to limit the extent of the search, by using the optional `where` argument. To use this we need to know the field names, which we saw in the previous output.
+
+For example, all the subsoil bulk densities from India:
+
+```{r ogrinfo.bd.india}
+bd.india.info <- gdalUtils::ogrinfo(wfs, layer="ms:wosis_latest_bdfi33",
+                                    where="country_name='India' AND upper_depth > 100",
+                                    ro=TRUE, so=TRUE, q=FALSE)
+ix.f <- grep("Feature Count", bd.india.info)
+bd.india.info[ix.f]
+(n.records <- as.numeric(strsplit(bd.india.info[ix.f],
+                                  split=": ", fixed=TRUE)[[1]][2]))
+```
+
+Here there are only `r n.records` records
+
+
+# Import WoSIS datasets to the client system
+
+There seems to be no way to directly import from the WFS to an R workspace object, so there must first be an intermediate step: download the WFS layer in an appropriate format to a local directory, and then import as usual for GIS layers.
+
+The `gdalUtilities::ogr2ogr` function reads from one format on the server and writes to another in the client, i.e., your local files. The default output file format is an [ESRI Shapefile](https://en.wikipedia.org/wiki/Shapefile); other formats can be specified with the (optional) `f` argument.
+
+The possible formats are listed [here](https://docs.geoserver.org/latest/en/user/services/wfs/outputformats.html).
+Here we explain how to access three of them:
+* [OGC Geopackages](#gpkg).
+* [ESRI Shapefiles](#shape)
+* [CSV files](#csv)
+
+The `where` and `spat` arguments can also be used here. You will often want  to limit the size of the object with one or both of these. The `ogr2ogr` function also allows an (optional) transformation to any EPSG-defined CRS with the `t_srs` argument. See `?ogr2ogr` for  more options.
+
+Set up a directory on the local file system to receive the downloaded files:
+
+```{r setup.local.dir}
+wosis.dir.name <- "./wosis_latest"
+if (!file.exists(wosis.dir.name)) dir.create(wosis.dir.name)
+```
+
+Note that **import via `ogr2ogr` can be quite slow**, because it depends on the network and the remote server, which may have a speed limitation to avoid overloads. Many of these downloads may take 15-20 minutes clock time, while only requiring less than a minute of local computer time.
+
+Therefore, the codes that use `ogr2ogr` first check if the file has already been downloaded, and if so, skips the download. If you want to make sure to get the latest version of the files, delete any you have previously downloaded; this will force a download from the server.
+
+## OGC Geopackage {#gpkg}
+
+WoSIS WFS is available as a OGC GeoPackage, using `f="GPKG` argument to `ogr2ogr`.
+
+For example, the profiles as a GeoPackage:
+
+```{r download.profile.gpkg}
+layer.name <- "wosis_latest_profiles"
+(dst.target.name <- paste0(wosis.dir.name,"/", layer.name, ".gpkg"))
+if (!file.exists(dst.target.name)) { 
+system.time(
+  gdalUtilities::ogr2ogr(src=wfs,
+          dst=dst.target.name,
+          layer=layer.name,
+          f = "GPKG",
+          overwrite=TRUE,
+          skipfailures=TRUE)
+)
+}
+file.info(dst.target.name)$size/1024/1024
+```
+
+This Geopackage is about 52 Mb.
+
+### Reading imported profiles into R
+
+Once the Geopackage has been downloaded to local storage, it can be read into R with the `st_read` function of the `sf` "Simple Features" package.
+
+```{r read.profile.gpkg}
+profiles.gpkg <- st_read(dst.target.name)
+class(profiles.gpkg)
+dim(profiles.gpkg)
+names(profiles.gpkg)
+```
+
+Many of these names  have no content at the whole-profile (site) level.
+
+Which countries have the most profiles?
+
+```{r}
+head(sort(table(profiles.gpkg$country_name), decreasing=TRUE))
+```
+
+These have georeference and so can be mapped. Here is an example of the profiles from  Brazil, showing their source datasets:
+
+```{r map.profiles.gpkg, fig.width=12, fig.height=12}
+ggplot(data=profiles.gpkg[(profiles.gpkg$country_name=="Brazil"), ]) +
+  aes(col=dataset_id) +
+  geom_sf(shape=21, size=0.8, fill="black")
+```
+
+## ESRI shapefiles {#shape}
+
+
+### WoSIS profiles as ESRI Shapefiles 
+
+WoSIS WFS is available as ESRI point shapefiles, using `f="ESRI Shapefile"` argument to `ogr2ogr`.
+
+Download the profile information for the whole world. This is a very large file.
+
+```{r download.profiles}
+layer.name <- "ms_wosis_latest_profiles"
+(dst.target.name <- paste0(wosis.dir.name,"/", layer.name, ".shp"))
+if (!file.exists(dst.target.name)) { 
+system.time(
+  gdalUtilities::ogr2ogr(src=wfs,
+          dst=wosis.dir.name,
+          layer=layer.name,
+          f = "ESRI Shapefile",
+          overwrite=TRUE,
+          skipfailures=TRUE)
+)
+}
+file.info(dst.target.name)$size/1024/1024
+```
+
+The number of profiles can be restricted with a `spat` spatial extent or a `where` SQL query.
+For example, to download just the Indian profiles, into a subdirectory:
+
+```{r download.profiles.india}
+wosis.dir.name.india <- "./wosis_latest/india"
+if (!file.exists(wosis.dir.name.india)) dir.create(wosis.dir.name.india)
+layer.name <- "ms_wosis_latest_profiles"
+(dst.target.name <- paste0(wosis.dir.name,"/", layer.name, ".shp"))
+if (!file.exists(dst.target.name)) { 
+  system.time(
+  gdalUtilities::ogr2ogr(src=wfs,
+          dst=wosis.dir.name.india,
+          layer=layer.name,
+          f = "ESRI Shapefile",
+          where="country_name='India'",
+          overwrite=TRUE,
+          skipfailures=TRUE)
+)
+}
+file.info(dst.target.name)$size/1024/1024
+```
+
+### Reading imported profiles into R
+
+Now read the downloaded shapefile of profiles into an R `sp` object.
+For shapefiles, the directory and layer names must be specified separately as two arguments, `dsn` ("data set name") and `layer`. Notice how the server name of this layer which begins with `ms:` has been changed to `ms_` during import, due to restrictions on file names on the local file system.
+
+
+```{r import.profiles}
+layer.name <- "ms_wosis_latest_profiles"
+profiles <- sf::st_read(dsn=wosis.dir.name, layer=layer.name,
+                stringsAsFactors = FALSE)
+class(profiles)
+dim(profiles)
+names(profiles)
+head(profiles)
+```
+
+The current database has `r dim(profiles)[2]` profiles. Quite a resource!
+
+The Indian profiles:
+
+```{r import.profiles.india}
+profiles.india <- sf::st_read(dsn=wosis.dir.name.india, layer=layer.name,
+                stringsAsFactors = FALSE)
+dim(profiles.india)
+names(profiles.india)
+head(profiles.india)
+```
+
+Here there are only `r dim(profiles.india)[2]` profiles, as we saw with `ogrinfo`, above.
+
+
+### WoSIS layers  as ESRI Shapefiles
+
+Download all records for a single property, here, bulk density, and save it a subdirectory of the current path, and with the default format. The directory must be first created if does not already exist.
+
+Note `f=` argument to specify the format, here ESRI shapefiles.
+
+```{r download.bd}
+layer.name <- "ms_wosis_latest_bdfi33"
+(dst.target.name <- paste0(wosis.dir.name,"/", layer.name, ".shp"))
+if (!file.exists(dst.target.name)) { 
+  system.time(
+  gdalUtilities::ogr2ogr(src=wfs,
+          dst=wosis.dir.name,
+          layer=layer.name,
+          f = "ESRI Shapefile",
+          overwrite=TRUE,
+          skipfailures=TRUE)
+)
+}
+file.info(dst.target.name)$size/1024/1024
+```
+
+
+Because the  destination format is `"ESRI Shapefile"` many of the field names have to be shortened, as shown by warnings such as "Warning 6: Normalized/laundered field name: 'profile_layer_id' to 'profile_la'".
+
+Note that `spat` is not applicable in this query because there is no spatial information in the attribute tables. However, it is possible to include an SQL query  with `where` to limit the size of the download:
+
+```{r download.bd.india}
+layer.name <- "ms_wosis_latest_bdfi33"
+(dst.target.name <- paste0(wosis.dir.name.india,"/", layer.name, ".shp"))
+if (!file.exists(dst.target.name)) { 
+  system.time(
+    gdalUtilities::ogr2ogr(src=wfs,
+                           dst=wosis.dir.name.india,
+                           layer=layer.name,
+                           f = "ESRI Shapefile",
+                           where="country_name='India'",
+                           overwrite=TRUE,
+                           skipfailures=TRUE)
+  )
+}
+file.info(dst.target.name)$size/1024/1024
+```
+
+
+
+### Reading imported layers into R
+
+Now read the downloaded shapefiles into an R `sf` object.
+
+For shapefiles, the directory and layer names must be specified separately as two arguments, `dsn` ("data set name") and `layer`. Notice how the server name of this layer which begins with `ms:` has been changed to `ms_` during import, due to restrictions on file names on the local file system.
+
+```{r import.bd}
+# here strings are just that, not to be interpreted as R factors
+layer.name <- "ms_wosis_latest_bdfi33"
+bd33 <- st_read(dsn=wosis.dir.name, layer=layer.name,
+                stringsAsFactors = FALSE)
+class(bd33)
+names(bd33)
+head(bd33)
+```
+
+Each record has some identification:
+
+* `gml_id`      the attribute name + `profile_la` (see below)
+* `profile_id`  profile internal ID
+* `profile_la`  profile + layer internal ID
+* `country_na`  country name
+* `upper_dept`  upper limit of layer from soil surface (excluding litter layer). cm
+* `lower_dept`  lower limit of layer from soil surface (excluding litter layer), cm
+* `layer_name`  layer name as assigned during original profile description
+* `litter`      whether the layer is a litter layer (0 = no, 1 = yes)
+
+
+Each attribute has several names, with the following extensions:
+
+* `value`  -- one or more values, in the format {1:value; 2:value...}, which are duplicate measurements 
+* `value_avg`  -- the average of the values
+* `method` -- text description of the analytical method
+* `date` -- one or more values, in the format {1:yyyy-mm-dd; 2:yyyy-mm-dd...}, 
+which are the dates each of th duplicate measurements was added to the database (not the original measurement date, nor the field sampling date)
+* `dataset_id` -- text code of original database
+* `profile_code` -- text code of profile from original database
+* `licence` -- text string of the Creative Commons ^[https://creativecommons.org/licenses/] license for this value, e.g. `CC-BY-NC`
+
+So for example the  attribute `bdfi33` has the following fields, shortened when input to a shapefile to the first ten characters; if these would be duplicated the name is further manipulated:
+
+* `bdfi33_value` $\to$ `bdfi33_val`
+* `bdfi33_value_avg`  $\to$ `bdfi33_v_1`
+* `bdfi33_method`  $\to$ `bdfi33_met`
+* `bdfi33_date`  $\to$ `bdfi33_dat`
+* `bdfi33_dataset_id`  $\to$ `bdfi33_d_1`
+* `bdfi33_profile_code`  $\to$ `bdfi33_pro`
+* `bdfi33_licence`  $\to$ `bdfi33_lic`
+
+The shapefile has been imported as a `SpatialPointsDataFrame`, a class within the `sp` package, with the correct CRS, as we saw from the `ogrinfo`.
+
+Examine the format of the attribute, this is in field `*_val`:
+
+```{r head.bd}
+head(bd33$bdfi33_val)
+```
+
+The format is `{seq:val[,seq:val]}` where the `seq` is an integer on `[1...]` indicating which measurement number -- note that there can be more than one measurement per property, e.g., repeated lab. measurements, and `val` is the numeric value.
+
+But the average value for a layer has its own field, so if we only want the average, it is prepared for us. We see an example here, from six rows chosen to show several profiles with their layers:
+
+```{r example.bd}
+bd33[75:80, c("profile_id","upper_dept","lower_dept","bdfi33_val","bdfi33_v_1")]
+```
+
+Here is the India example. We make a histogram of the representative values.
+
+```{r import.bd.india, out.width='0.7\\linewidth'}
+layer.name <- "ms_wosis_latest_bdfi33"
+bd33.india <- st_read(dsn=wosis.dir.name.india, layer=layer.name,
+                stringsAsFactors = FALSE)
+class(bd33.india)
+dim(bd33.india)
+(profile.id.india <- unique(bd33.india$profile_id))
+names(bd33.india)
+hist(bd33.india$bdfi33_v_1, main="Bulk density, soil layers in India", 
+     xlab="g cm^{-3}")
+rug(bd33.india$bdfi33_v_1)
+```
+
+Here there are `r dim(bd33.india)[1]` records in
+`r length(unique(bd33.india$profile_id))` profiles.
+These profiles can be found in the profiles database.
+
+### Mapping soil properties
+
+The location of the profiles is given in the `"wosis_latest_profiles"` table, whereas the soil properties are in separate tables, for example `"ms_wosis_latest_bdfi33"` for the bulk density. Both have a `profile_id` field. So to map a property, the profile ID must be used for a left join, to add the coordinates to the properties table.
+
+First, select the bulk densities for a specified depth, here 30 cm:
+
+```{r select.bd33.30cm}
+bd30cm <- bd33.india %>%
+  select(profile_id, upper_dept, lower_dept, bdfi33_v_1) %>%
+  filter((lower_dept > 30) ) %>%
+  group_by(profile_id) %>%    # may be more than one layer deeper than this
+  arrange(upper_dept) %>%     # select the shallowest
+  filter(row_number() == 1) %>%
+  ungroup()
+glimpse(bd30cm)
+```
+
+Now join with the profile information. Note that the geometry information is duplicated, we only need it in the first-named object to be joined.
+
+```{r join.profile.bd33}
+india.pts <- profiles.india %>%
+  select(profile_id, geometry) 
+bd30cm.j <- 
+  left_join(india.pts, st_drop_geometry(bd30cm), by="profile_id")
+print(bd30cm.j)
+```
+
+Now we can display the map, using the `geom_sf` geometry primitive in `ggplot`. The country boundary is obtained from the `mapdata` package.
+
+```{r}
+IN <- map_data(map = 'world',
+               region = 'India')
+# remove named subregions, i.e., the islands
+ix <- which(is.na(IN$subregion))
+IN <- IN[ix,]
+ggplot() +
+  geom_path(aes(x = long, y = lat), data=IN) +
+  geom_sf(data = bd30cm, aes(col = bdfi33_v_1)) +
+  labs(title = "Bulk density at 30 cm depth", col = expression(paste(g," ", cm)^-3))
+```
+
+Obviously, there is not much information for this soil property for India.
+
+## CSV files {#csv}
+
+Another output format for `ogr2ogr` is the CSV 'comma-separated values' plain-text file. These typically have one header row giving the name of each column (field), and then one row (case, tuple) per observation
+
+### WoSIS profiles as CSV files 
+
+WoSIS WFS is available as CSV files, using `f="CSV"` argument to `ogr2ogr`.
+
+For example, read the profile information for the $2^\circ \times 2^\circ$ tile in central Europe.
+
+```{r download.profiles.csv}
+wosis.dir.name.ceu <- "./wosis_latest/central_europe"
+if (!file.exists(wosis.dir.name.ceu)) dir.create(wosis.dir.name.ceu)
+src.layer.name <- "ms:wosis_latest_profiles"
+dst.layer.name <- "wosis_latest_profiles_ceu"
+(dst.target.name <- paste0(wosis.dir.name.ceu,"/",dst.layer.name,".csv"))
+if (!file.exists(dst.target.name)) {
+gdalUtilities::ogr2ogr(src=wfs, 
+        dst=dst.target.name,
+        layer=src.layer.name,
+        f="CSV",
+        spat=c(6, 48, 8, 50),
+        overwrite=TRUE)
+}
+round(file.info(dst.target.name)$size/1024,1)
+```
+
+This file is about `r round(file.info(dst.target.name)$size/1024)` Kb.
+
+### Read imported CSV-formatted profiles into R
+
+The `read.csv` function reads from a CSV file into an R `data.frame`.
+
+Read the profiles (sites) from central Europe:
+
+```{r import.profiles.csv}
+layer.name <- "wosis_latest_profiles_ceu"
+system.time(
+  profiles.ceu <- read.csv(paste0(wosis.dir.name.ceu, "/",layer.name,".csv"),
+                stringsAsFactors = FALSE)
+)
+names(profiles.ceu)
+```
+
+### WoSIS layers as CSV files 
+
+Get the the bulk density for the layers in these profiles. Note that this query can not be limited by coordinates, since they are not included in this table. So we get all the layers and then limit to the profiles of interest.
+
+```{r download.bd.csv}
+src.layer.name <- "wosis_latest_bdfi33"
+dst.layer.name <- "wosis_latest_bdfi33"
+(dst.target.name <- paste0(wosis.dir.name,"/",dst.layer.name,".csv"))
+if (!file.exists(dst.target.name)) { 
+gdalUtilities::ogr2ogr(src=wfs,
+        dst=dst.target.name,
+        layer=src.layer.name,
+        f="CSV",
+        overwrite=TRUE)
+}
+file.info(dst.target.name)$size/1024/1024
+```
+
+This is a very large file, about `r round(file.info(dst.target.name)$size/1024/1024)` Mb.
+ 
+### Read imported layers into R
+
+The bulk density per-layer. 
+
+```{r import.bd.csv}
+layer.name <- "wosis_latest_bdfi33"
+system.time(
+  bd33.pts <- read.csv(file=paste0(wosis.dir.name,"/",layer.name,".csv"),
+                stringsAsFactors = FALSE)
+)
+dim(bd33.pts)
+names(bd33.pts)
+```
+
+Notice that here we have the complete field names,
+not truncated as they were in the shapefiles.
+These can now be processed as above, i.e., the shapefiles.
+
+
+# Spatial objects     
+
+Once the WoSIS profiles have been imported to R they can be converted to a spatial object in the `sf` package, by specifying the coördinates and the Coordinate Reference System (CRS), which we know from the WoSIS metadata is EPSG code 4326 (geographic coordinates on the WGS84 datum).
+
+For example, here are the central Europe profiles as a spatial object:
+ 
+```{r coordinates.profiles}
+profiles.ceu <- st_as_sf(profiles.ceu, 
+                         coords = c("longitude", "latitude"),
+                         crs = 4326)
+class(profiles.ceu)
+```
+
+Review some site information, e.g., the WRB Reference Soil Groups:
+
+```{r profiles.wrb}
+table(profiles.ceu$cwrb_reference_soil_group)
+```
+
+Note that most of these profiles do not have a WRB classification.
+
+Display a map of the profiles with their classification:
+
+```{r map.profiles.wrb}
+ggplot(data=profiles.ceu) +
+  aes(col=cwrb_reference_soil_group) +
+  geom_sf()
+```
+
+# Working with WoSIS as a `SoilProfileCollection`
+
+The `aqp` "Algorithms for Quantitive Pedology" package [@Beaudette_2013] defines data structures and functions specific to soil profile data, i.e., with site and linked layer information.
+
+Load the package, and the `data.table` package on which it depends:
+
+```{r load.aqp}
+require(data.table)
+require(aqp)            # Algorithms for Quantitative Pedology
+```
+
+
+Convert the bulk density `sf` object to a `SoilProfileCollection`, a data type defined in `aqp`. This data type has separate structures for the site (profile) and horizons. It does not have geometry, so we use `st_drop_geometry` to convert the `sf` object to a data frame.
+
+The `aqp::depths` function initializes the SoilProfileCollection object. The formula has the field name of the profile on the left, and the the field names of the horizon boundaries on the right. These fields are in the WoSIS layer.
+
+```{r bd.aqp}
+ds.aqp <- st_drop_geometry(bd33)
+depths(ds.aqp) <- profile_id ~ upper_dept + lower_dept
+is(ds.aqp)
+slotNames(ds.aqp)
+str(ds.aqp@site)
+str(ds.aqp@horizons)
+head(ds.aqp@site)
+head(ds.aqp@horizons[c(2,5,6,7,9)],12)
+```
+
+Note how the horizons have been grouped into sites, in the `@site` slot, and the per-horizon (by depth) values are in the `@horizons` slot. Here we have `r dim(ds.aqp@horizons)[1]` horizons in `r dim(ds.aqp@site)[1]` profiles.
+
+Now this `SoilProfileCollection` can be used for many `aqp` functions. For example, here is the depth distribution of average bulk density of the components for the first 24 listed profiles, labelled by genetic horizon:
+
+```{r plot.bd.spc,fig.width=12, fig.height=8}
+plotSPC(ds.aqp[1:24,], name="layer_name", color='bdfi33_v_1')
+```
+
+Several layers in this set of profiles are missing bulk density.
+
+# References
