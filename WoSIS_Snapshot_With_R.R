@@ -10,7 +10,7 @@ library(DBI)            # R database interface
 library(RSQLite)        # R interface to SQLite databses
 
 
-
+#
 
 ## ----download.snapshot.2019--------------------------------------------------------------------------------------------
 wosis.dir.name <- "./wosis2019"
